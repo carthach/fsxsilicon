@@ -98,7 +98,9 @@ kills a leftover one first.
 ## FSX (`./fsxsilicon install`)
 
 Copies `runtime/dxmt/*.dll`, `fsxopt.dll` and `fsxrumble.exe` into the FSX folder (`runtime/FSX` links to it), writes
-`%APPDATA%\Microsoft\FSX-SE\exe.xml` (starts fsxrumble with FSX) if there isn't one, and sets in `fsx_se.CFG`:
+`exe.xml` (starts fsxrumble with FSX) if there isn't one, and sets in FSX's config file. That is
+`%APPDATA%\Microsoft\FSX\fsx.CFG` when FSX: Steam Edition is the only FSX installed, and `FSX-SE\fsx_se.CFG` when it
+sits beside the boxed FSX; `install` picks the folder in which FSX's first run created `scenery.cfg`.
 - `[GRAPHICS] D3D10=1`: DX10 preview mode. Without it FSX takes its DX9 path, which can't render here, and quits.
 - `[JobScheduler] AffinityMask=62`: FSX's hyper-threading detection gives mask 2 under Rosetta.
 - `[Trusted] fsxrumble.exe.<hash>=1`: FSX asks once whether to trust a new add-on executable (and again after every

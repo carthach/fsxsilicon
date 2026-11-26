@@ -50,7 +50,13 @@ cmd_deps() {
 cmd_build() { "$REPO/scripts/build.sh" "$@"; ok "next: ./fsxsilicon setup"; }
 
 users_dir() { echo "$PREFIX/drive_c/users/$USER"; }
-fsx_appdata() { echo "$(users_dir)/AppData/Roaming/Microsoft/FSX-SE"; }
+# FSX: Steam Edition keeps its settings in Microsoft\FSX-SE\fsx_se.CFG when the boxed FSX is also installed, and
+# in Microsoft\FSX\fsx.CFG when it is the only FSX. Its first run creates scenery.cfg in the folder it uses.
+fsx_appdata() {
+    local m="$(users_dir)/AppData/Roaming/Microsoft"
+    if [ -f "$m/FSX/scenery.cfg" ] && [ ! -f "$m/FSX-SE/scenery.cfg" ]; then echo "$m/FSX"; else echo "$m/FSX-SE"; fi
+}
+fsx_cfg() { case "$1" in */FSX) echo "$1/fsx.CFG" ;; *) echo "$1/fsx_se.CFG" ;; esac; }
 
 # true if FILE is missing or is one of Wine's own DLLs
 is_wine_dll() { [ ! -f "$1" ] || LC_ALL=C grep -aq 'Wine builtin DLL' "$1"; }
@@ -134,8 +140,9 @@ cmd_install() {
         echo "note: $a/exe.xml exists without fsxrumble; add the entry from config/exe.xml for controller rumble"
     fi
 
-    log "fsx_se.CFG: DX10 mode, job scheduler mask, trusted fsxrumble"
-    local cfg="$a/fsx_se.CFG" py="python3 -I $REPO/scripts/fsxcfg.py"
+    local cfg; cfg=$(fsx_cfg "$a")
+    log "${cfg##*/}: DX10 mode, job scheduler mask, trusted fsxrumble"
+    local py="python3 -I $REPO/scripts/fsxcfg.py"
     $py "$cfg" set GRAPHICS D3D10 1             # without it FSX takes its DX9 path, which can't render here
     $py "$cfg" set JobScheduler AffinityMask 62 # FSX's hyper-threading detection gives mask 2 under Rosetta
     $py "$cfg" trust fsxrumble.exe
