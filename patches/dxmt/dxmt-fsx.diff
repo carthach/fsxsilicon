@@ -1,0 +1,267 @@
+diff --git a/src/d3d11/d3d11.cpp b/src/d3d11/d3d11.cpp
+index 948dc84..c2e5ab3 100644
+--- a/src/d3d11/d3d11.cpp
++++ b/src/d3d11/d3d11.cpp
+@@ -238,6 +238,17 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+     return TRUE;
+ 
+   DisableThreadLibraryCalls(instance);
++  /* fsxsilicon: load game-specific helpers (fsxopt.dll: SSE replacement for FSX's CPU vertex transform)
++   * from the game folder when present */
++  {
++    char path[MAX_PATH];
++    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
++    while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
++    if (n && n + 11 < MAX_PATH) {
++      memcpy(path + n, "fsxopt.dll", 11);
++      if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) LoadLibraryA(path);
++    }
++  }
+   return TRUE;
+ }
+ 
+diff --git a/src/d3d11/d3d11_buffer.cpp b/src/d3d11/d3d11_buffer.cpp
+index c354db3..c904118 100644
+--- a/src/d3d11/d3d11_buffer.cpp
++++ b/src/d3d11/d3d11_buffer.cpp
+@@ -89,7 +89,19 @@ public:
+     // if (pDesc->Usage != D3D11_USAGE_DEFAULT)
+     if (pDesc->Usage == D3D11_USAGE_IMMUTABLE)
+       flags.set(BufferAllocationFlag::GpuReadonly);
+-    if (pDesc->Usage != D3D11_USAGE_DYNAMIC) {
++#ifdef __i386__
++    /* fsxsilicon: on i386 (WoW64) Metal-owned memory is out of reach, so each UpdateSubresource of a
++     * GpuManaged constant buffer is a unix call. Constant buffers are small and updated constantly
++     * (d3d10 effects), so place them in our own memory like dynamic buffers: updates become a memcpy. */
++    const bool placed_constant_buffer =
++        pDesc->Usage == D3D11_USAGE_DEFAULT && pDesc->BindFlags == D3D11_BIND_CONSTANT_BUFFER;
++#else
++    const bool placed_constant_buffer = false;
++#endif
++    if (placed_constant_buffer) {
++      flags.set(BufferAllocationFlag::SuballocateFromOnePage);
++      flags.set(BufferAllocationFlag::CpuPlaced);
++    } else if (pDesc->Usage != D3D11_USAGE_DYNAMIC) {
+       if (pInitialData)
+         flags.set(BufferAllocationFlag::GpuManaged);
+       else if (pDesc->BindFlags & kD3D11OutputBindFlags)
+diff --git a/src/d3d11/d3d11_context_def.cpp b/src/d3d11/d3d11_context_def.cpp
+index a49dd16..f12481b 100644
+--- a/src/d3d11/d3d11_context_def.cpp
++++ b/src/d3d11/d3d11_context_def.cpp
+@@ -50,7 +50,7 @@ DeferredContextBase::AllocateCommandData(size_t n) {
+ }
+ 
+ template <>
+-std::tuple<WMT::Buffer, uint64_t>
++std::tuple<WMT::Buffer, uint64_t, void *>
+ DeferredContextBase::AllocateStagingBuffer(size_t size, size_t alignment) {
+   return ctx_state.current_cmdlist->AllocateStagingBuffer(size, alignment);
+ }
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 90e0703..10ffbb0 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -48,7 +48,7 @@ ImmediateContextBase::AllocateCommandData(size_t n) {
+ }
+ 
+ template <>
+-std::tuple<WMT::Buffer, uint64_t>
++std::tuple<WMT::Buffer, uint64_t, void *>
+ ImmediateContextBase::AllocateStagingBuffer(size_t size, size_t alignment) {
+   return ctx_state.cmd_queue.AllocateStagingBuffer(size, alignment);
+ }
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index d2ef5d4..8eb22dd 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -1241,8 +1241,8 @@ public:
+         // So it's legal?
+         UNIMPLEMENTED("update buffer: staging");
+       } else if (auto bindable = GetResourceCommon(pDstResource)) {
+-        auto [staging_buffer, offset] = AllocateStagingBuffer(copy_len, 16);
+-        staging_buffer.updateContents(offset, pSrcData, copy_len);
++        auto [staging_buffer, offset, staging_mapped] = AllocateStagingBuffer(copy_len, 16);
++        WriteStaging(staging_buffer, staging_mapped, offset, pSrcData, copy_len);
+         SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+         EmitOP([staging_buffer, offset, dst = bindable->buffer(), copy_offset, copy_len](ArgumentEncodingContext &enc) {
+           auto [dst_buffer, dst_offset] = enc.access(dst, copy_offset, copy_len, ResourceAccess::Write);
+@@ -1290,6 +1290,7 @@ public:
+ 
+ #pragma region DrawCall
+ 
++
+   void
+   STDMETHODCALLTYPE
+   Draw(UINT VertexCount, UINT StartVertexLocation) override {
+@@ -3273,7 +3274,16 @@ public:
+ 
+   template <typename T> moveonly_list<T> AllocateCommandData(size_t n = 1);
+ 
+-  std::tuple<WMT::Buffer, uint64_t> AllocateStagingBuffer(size_t size, size_t alignment);
++  std::tuple<WMT::Buffer, uint64_t, void *> AllocateStagingBuffer(size_t size, size_t alignment);
++
++  /* write into a staging slice: memcpy when its memory is ours, otherwise through Metal */
++  static void
++  WriteStaging(WMT::Buffer buffer, void *mapped, uint64_t offset, const void *data, uint64_t length) {
++    if (mapped)
++      memcpy((char *)mapped + offset, data, length);
++    else
++      buffer.updateContents(offset, data, length);
++  }
+   void UseCopyDestination(Rc<StagingResource> &);
+   void UseCopySource(Rc<StagingResource> &);
+ 
+@@ -4212,19 +4222,19 @@ public:
+ 
+     if (auto dst = GetTexture(cmd.pDst)) {
+       auto bytes_per_depth_slice = cmd.EffectiveRows * cmd.EffectiveBytesPerRow;
+-      auto [staging_buffer, offset] = AllocateStagingBuffer(bytes_per_depth_slice * cmd.DstSize.depth, 16);
++      auto [staging_buffer, offset, staging_mapped] = AllocateStagingBuffer(bytes_per_depth_slice * cmd.DstSize.depth, 16);
+       if (cmd.EffectiveBytesPerRow == SrcRowPitch) {
+         for (unsigned depthSlice = 0; depthSlice < cmd.DstSize.depth; depthSlice++) {
+           auto dst_offset = offset + depthSlice * bytes_per_depth_slice;
+           const char *src = ((const char *)pSrcData) + depthSlice * SrcDepthPitch;
+-          staging_buffer.updateContents(dst_offset, src, bytes_per_depth_slice);
++          WriteStaging(staging_buffer, staging_mapped, dst_offset, src, bytes_per_depth_slice);
+         }
+       } else {
+         for (unsigned depthSlice = 0; depthSlice < cmd.DstSize.depth; depthSlice++) {
+           for (unsigned row = 0; row < cmd.EffectiveRows; row++) {
+             auto dst_offset = offset + row * cmd.EffectiveBytesPerRow + depthSlice * bytes_per_depth_slice;
+             const char *src = ((const char *)pSrcData) + row * SrcRowPitch + depthSlice * SrcDepthPitch;
+-            staging_buffer.updateContents(dst_offset, src,  cmd.EffectiveBytesPerRow);
++            WriteStaging(staging_buffer, staging_mapped, dst_offset, src, cmd.EffectiveBytesPerRow);
+           }
+         }
+       }
+@@ -5424,7 +5434,7 @@ public:
+       context_flag(context_flag),
+       cmdlist_pool(pPool),
+       staging_allocator({pDevice->GetMTLDevice(), WMTResourceOptionCPUCacheModeWriteCombined |
+-                                       WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModeManaged, false
++                                       WMTResourceHazardTrackingModeUntracked | kStagingStorageMode, kStagingPlaced
+       }),
+       cpu_command_allocator({}) {};
+ 
+@@ -5497,10 +5507,10 @@ public:
+     return moveonly_list<T>((T *)allocate_cpu_heap(sizeof(T) * n, alignof(T)), n);
+   }
+ 
+-  std::tuple<WMT::Buffer, uint64_t>
++  std::tuple<WMT::Buffer, uint64_t, void *>
+   AllocateStagingBuffer(size_t size, size_t alignment) {
+     auto [block, offset] = staging_allocator.allocate(1, 0, size, alignment);
+-    return {block.buffer, offset};
++    return {block.buffer, offset, block.mapped_address};
+   }
+ 
+   void *
+diff --git a/src/d3d11/d3d11_shader.cpp b/src/d3d11/d3d11_shader.cpp
+index e11d16c..7c6c526 100644
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -135,15 +135,22 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
+     data_gs_passthrough.type = SM50_SHADER_GS_PASS_THROUGH;
+     data_gs_passthrough.DataEncoded = variant.gs_passthrough;
+     data_gs_passthrough.RasterizationDisabled = variant.rasterization_disabled;
+-    data_gs_passthrough.next = common;
++    /* fsxsilicon: always pass an IA layout. Without one (no input layout bound, which D3D allows: unbound
++     * inputs read as 0) the shader keeps [[stage_in]] inputs and Metal refuses the PSO ("Vertex function has
++     * input attributes but no vertex descriptor was set"), dropping the draw. FSX draws its glyph text so. */
++    data_gs_passthrough.next = &data_ia_layout;
++    data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
++    data_ia_layout.next = common;
++    data_ia_layout.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_NONE;
+     if (variant.input_layout_handle) {
+-      data_gs_passthrough.next = &data_ia_layout;
+-      data_ia_layout.type = SM50_SHADER_IA_INPUT_LAYOUT;
+-      data_ia_layout.next = common;
+       data_ia_layout.slot_mask = variant.input_layout_handle->input_slot_mask();
+       data_ia_layout
+           .num_elements = variant.input_layout_handle->input_layout_element(
+           (MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC **)&data_ia_layout.elements);
++    } else {
++      data_ia_layout.slot_mask = 0;
++      data_ia_layout.num_elements = 0;
++      data_ia_layout.elements = nullptr;
+     }
+ 
+     sm50_bitcode_t compile_result = nullptr;
+diff --git a/src/dxmt/dxmt_command_queue.cpp b/src/dxmt/dxmt_command_queue.cpp
+index 89ffc37..c907aff 100644
+--- a/src/dxmt/dxmt_command_queue.cpp
++++ b/src/dxmt/dxmt_command_queue.cpp
+@@ -42,7 +42,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
+     event_listener_thread([this]() { SharedEventListener_start(this->shared_event_listener); }),
+     staging_allocator({
+         device, WMTResourceOptionCPUCacheModeWriteCombined | WMTResourceHazardTrackingModeUntracked |
+-                    WMTResourceStorageModeManaged, false
++                    kStagingStorageMode, kStagingPlaced
+     }),
+     copy_temp_allocator({device, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate}),
+     argbuf_allocator({
+diff --git a/src/dxmt/dxmt_command_queue.hpp b/src/dxmt/dxmt_command_queue.hpp
+index e109af7..e446e33 100644
+--- a/src/dxmt/dxmt_command_queue.hpp
++++ b/src/dxmt/dxmt_command_queue.hpp
+@@ -281,10 +281,10 @@ public:
+     cpu_coherent.wait(seq);
+   };
+ 
+-  std::tuple<WMT::Buffer, uint64_t>
++  std::tuple<WMT::Buffer, uint64_t, void *>
+   AllocateStagingBuffer(size_t size, size_t alignment) {
+     auto [block, offset] = staging_allocator.allocate(ready_for_encode, cpu_coherent.signaledValue(), size, alignment);
+-    return {block.buffer, offset};
++    return {block.buffer, offset, block.mapped_address};
+   }
+ 
+   std::pair<WMT::Buffer, uint64_t>
+diff --git a/src/dxmt/dxmt_ring_bump_allocator.hpp b/src/dxmt/dxmt_ring_bump_allocator.hpp
+index 5c92d92..24f05db 100644
+--- a/src/dxmt/dxmt_ring_bump_allocator.hpp
++++ b/src/dxmt/dxmt_ring_bump_allocator.hpp
+@@ -4,12 +4,23 @@
+ #include "log/log.hpp"
+ #include "thread.hpp"
+ #include "util_math.hpp"
++#include "wsi_platform.hpp"
+ #include <mutex>
+ #include <queue>
+ 
+ namespace dxmt {
+ 
+ constexpr size_t kStagingBlockSize = 0x2000000; // 32MB
++
++// fsxsilicon: on i386 (WoW64) Metal-owned memory is above 4GB, so every upload into it is a unix call.
++// Place staging blocks in our own (32-bit addressable) memory instead, so uploads are a memcpy.
++#ifdef __i386__
++constexpr WMTResourceOptions kStagingStorageMode = WMTResourceStorageModeShared;
++constexpr bool kStagingPlaced = true;
++#else
++constexpr WMTResourceOptions kStagingStorageMode = WMTResourceStorageModeManaged;
++constexpr bool kStagingPlaced = false;
++#endif
+ constexpr size_t kStagingBlockSizeForDeferredContext = 0x200000; // 2MB
+ constexpr size_t kStagingBlockLifetime = 300;
+ 
+@@ -97,7 +108,7 @@ public:
+ 
+     ~Block() {
+       if (mapped_address) {
+-        free(mapped_address);
++        wsi::aligned_free(mapped_address);
+         mapped_address = nullptr;
+       }
+     };
+@@ -116,7 +127,8 @@ public:
+   Block
+   allocate(size_t block_size) {
+     Block block{};
+-    block.mapped_address = placed_buffer_ ? malloc(block_size) : nullptr;
++    // newBufferWithBytesNoCopy needs page-aligned memory
++    block.mapped_address = placed_buffer_ ? wsi::aligned_malloc(block_size, 0x4000) : nullptr;
+     WMTBufferInfo info;
+     info.options = buffer_info_;
+     info.memory.set(block.mapped_address);

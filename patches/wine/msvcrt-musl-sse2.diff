@@ -1,0 +1,106 @@
+--- a/libs/musl/src/internal/libm.h
++++ b/libs/musl/src/internal/libm.h
+@@ -1,5 +1,11 @@
+ #ifndef _LIBM_H
+ #define _LIBM_H
++
++/* fsxsilicon: i386 PE code defaults to x87 maths, which is slow under Rosetta (and emulated by x87sidecar);
++ * musl uses double_t = double, so plain SSE2 double arithmetic is exact here. */
++#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
++#pragma GCC target("sse2", "fpmath=sse")
++#endif
+ 
+ #include <stdint.h>
+ #include <float.h>
+--- a/dlls/msvcrt/math.c
++++ b/dlls/msvcrt/math.c
+@@ -35,6 +35,11 @@
+  * ====================================================
+  */
+ 
++/* fsxsilicon: i386 PE code defaults to x87 maths, which is slow under Rosetta (and emulated by x87sidecar);
++ * see libs/musl/src/internal/libm.h. */
++#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
++#pragma GCC target("sse2", "fpmath=sse")
++#endif
+ #include <assert.h>
+ #include <complex.h>
+ #include <stdio.h>
+@@ -544,22 +549,70 @@
+             __ASM_CFI(".cfi_def_cfa %esp,4\n\t") \
+             __ASM_CFI(".cfi_same_value %ebp\n\t") \
+             "ret")
++
++/* fsxsilicon: fast paths. The generic wrappers above spill and reload the whole x87 stack around every call
++ * (fxam/fstsw probes, up to 8 stores and loads), which is costly under Rosetta. With the libm built for SSE2
++ * (see libs/musl/src/internal/libm.h), sin/cos/tan/atan/exp/log use at most one x87 register (for return
++ * values) and never reach math_error() for the inputs accepted here, so those calls can go straight through.
++ * The check sees the argument's high word in %eax; anything else (NaN, infinity, range errors) jumps to the
++ * original wrapper with the x87 stack untouched. sqrt of a non-negative finite value is a single fsqrt. */
++#define CREATE_FPU_FUNC1_FAST(name, call, check) \
++    __ASM_GLOBAL_FUNC(name, \
++            "subl    $12, %esp\n\t" \
++            __ASM_CFI(".cfi_adjust_cfa_offset 12\n\t") \
++            "fstl    (%esp)\n\t"   /* copy the argument, keep it in st(0) */ \
++            "movl    4(%esp), %eax\n\t" \
++            check \
++            "fstp    %st(0)\n\t"   /* pop it: the callee takes it from the stack */ \
++            "call    " __ASM_NAME( #call ) "\n\t" \
++            "addl    $12, %esp\n\t" \
++            __ASM_CFI(".cfi_adjust_cfa_offset -12\n\t") \
++            "ret\n" \
++            "9:\n\t" \
++            __ASM_CFI(".cfi_adjust_cfa_offset 12\n\t") \
++            "addl    $12, %esp\n\t" \
++            __ASM_CFI(".cfi_adjust_cfa_offset -12\n\t") \
++            "jmp     " __ASM_NAME( #name "_slow" ))
+ 
++/* finite */
++#define FPU_CHECK_FINITE "andl $0x7fffffff, %eax\n\tcmpl $0x7ff00000, %eax\n\tjae 9f\n\t"
++/* |x| < 512: exp() can neither overflow nor underflow */
++#define FPU_CHECK_EXP    "andl $0x7fffffff, %eax\n\tcmpl $0x40800000, %eax\n\tjae 9f\n\t"
++/* positive normal number */
++#define FPU_CHECK_LOG    "cmpl $0x00100000, %eax\n\tjl 9f\n\tcmpl $0x7ff00000, %eax\n\tjge 9f\n\t"
++
+ CREATE_FPU_FUNC1(_CIacos, acos)
+ CREATE_FPU_FUNC1(_CIasin, asin)
+-CREATE_FPU_FUNC1(_CIatan, atan)
++CREATE_FPU_FUNC1(_CIatan_slow, atan)
++CREATE_FPU_FUNC1_FAST(_CIatan, atan, FPU_CHECK_FINITE)
+ CREATE_FPU_FUNC2(_CIatan2, atan2)
+-CREATE_FPU_FUNC1(_CIcos, cos)
++CREATE_FPU_FUNC1(_CIcos_slow, cos)
++CREATE_FPU_FUNC1_FAST(_CIcos, cos, FPU_CHECK_FINITE)
+ CREATE_FPU_FUNC1(_CIcosh, cosh)
+-CREATE_FPU_FUNC1(_CIexp, exp)
++CREATE_FPU_FUNC1(_CIexp_slow, exp)
++CREATE_FPU_FUNC1_FAST(_CIexp, exp, FPU_CHECK_EXP)
+ CREATE_FPU_FUNC2(_CIfmod, fmod)
+-CREATE_FPU_FUNC1(_CIlog, log)
++CREATE_FPU_FUNC1(_CIlog_slow, log)
++CREATE_FPU_FUNC1_FAST(_CIlog, log, FPU_CHECK_LOG)
+ CREATE_FPU_FUNC1(_CIlog10, log10)
+ CREATE_FPU_FUNC2(_CIpow, pow)
+-CREATE_FPU_FUNC1(_CIsin, sin)
++CREATE_FPU_FUNC1(_CIsin_slow, sin)
++CREATE_FPU_FUNC1_FAST(_CIsin, sin, FPU_CHECK_FINITE)
+ CREATE_FPU_FUNC1(_CIsinh, sinh)
+-CREATE_FPU_FUNC1(_CIsqrt, sqrt)
+-CREATE_FPU_FUNC1(_CItan, tan)
++CREATE_FPU_FUNC1(_CIsqrt_slow, sqrt)
++__ASM_GLOBAL_FUNC(_CIsqrt,
++        "subl    $12, %esp\n\t"
++        __ASM_CFI(".cfi_adjust_cfa_offset 12\n\t")
++        "fstl    (%esp)\n\t"
++        "movl    4(%esp), %eax\n\t"
++        "addl    $12, %esp\n\t"
++        __ASM_CFI(".cfi_adjust_cfa_offset -12\n\t")
++        "cmpl    $0x7ff00000, %eax\n\t"   /* negative (sign bit set) or not finite */
++        "jae     " __ASM_NAME("_CIsqrt_slow") "\n\t"
++        "fsqrt\n\t"
++        "ret")
++CREATE_FPU_FUNC1(_CItan_slow, tan)
++CREATE_FPU_FUNC1_FAST(_CItan, tan, FPU_CHECK_FINITE)
+ CREATE_FPU_FUNC1(_CItanh, tanh)
+ 
+ __ASM_GLOBAL_FUNC(_ftol,

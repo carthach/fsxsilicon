@@ -1,0 +1,104 @@
+--- a/dlls/winemac.drv/vulkan.c
++++ b/dlls/winemac.drv/vulkan.c
+@@ -30,6 +30,8 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <dlfcn.h>
++#include <pthread.h>
++#include <stdlib.h>
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -139,3 +141,92 @@
+     *driver_funcs = &macdrv_vulkan_driver_funcs;
+     return STATUS_SUCCESS;
+ }
++
++/* fsxsilicon: compatibility table for DXMT's winemetal.so, which looks up "macdrv_functions"
++ * with dlsym(RTLD_DEFAULT) and expects the older (Wine 8 / CrossOver) layout of
++ * struct macdrv_win_data: { hwnd, cocoa_window, cocoa_view, client_cocoa_view }.
++ * Wine 11 changed that struct and moved client views to client surfaces, so get_win_data
++ * here returns a small struct in the old layout whose client_cocoa_view comes from a client
++ * surface. The surface is kept per window (DXMT creates its Metal view on top of it). */
++struct dxmt_compat_win_data
++{
++    HWND          hwnd;
++    macdrv_window cocoa_window;
++    macdrv_view   cocoa_view;
++    macdrv_view   client_cocoa_view;
++};
++
++struct dxmt_functions
++{
++    void (*macdrv_init_display_devices)(BOOL);
++    struct dxmt_compat_win_data *(*get_win_data)(HWND hwnd);
++    void (*release_win_data)(struct dxmt_compat_win_data *data);
++    macdrv_window (*macdrv_get_cocoa_window)(HWND hwnd, BOOL require_on_screen);
++    macdrv_metal_device (*macdrv_create_metal_device)(void);
++    void (*macdrv_release_metal_device)(macdrv_metal_device d);
++    macdrv_metal_view (*macdrv_view_create_metal_view)(macdrv_view v, macdrv_metal_device d);
++    macdrv_metal_layer (*macdrv_view_get_metal_layer)(macdrv_metal_view v);
++    void (*macdrv_view_release_metal_view)(macdrv_metal_view v);
++    void (*on_main_thread)(void *block);
++};
++
++static struct { HWND hwnd; struct macdrv_client_surface *surface; } dxmt_surfaces[64];
++static pthread_mutex_t dxmt_surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static struct macdrv_client_surface *dxmt_client_surface(HWND hwnd)
++{
++    struct macdrv_client_surface *surface = NULL;
++    unsigned int i, free_slot = ARRAY_SIZE(dxmt_surfaces);
++
++    pthread_mutex_lock(&dxmt_surfaces_lock);
++    for (i = 0; i < ARRAY_SIZE(dxmt_surfaces); i++)
++    {
++        if (dxmt_surfaces[i].hwnd == hwnd) { surface = dxmt_surfaces[i].surface; break; }
++        if (!dxmt_surfaces[i].hwnd && free_slot == ARRAY_SIZE(dxmt_surfaces)) free_slot = i;
++    }
++    if (!surface && free_slot < ARRAY_SIZE(dxmt_surfaces) && (surface = macdrv_client_surface_create(hwnd)))
++    {
++        dxmt_surfaces[free_slot].hwnd = hwnd;
++        dxmt_surfaces[free_slot].surface = surface;
++    }
++    pthread_mutex_unlock(&dxmt_surfaces_lock);
++    return surface;
++}
++
++static struct dxmt_compat_win_data *dxmt_get_win_data(HWND hwnd)
++{
++    struct dxmt_compat_win_data *compat;
++    struct macdrv_client_surface *surface;
++    struct macdrv_win_data *data;
++
++    if (!(compat = calloc(1, sizeof(*compat)))) return NULL;
++    compat->hwnd = hwnd;
++    if ((data = get_win_data(hwnd)))
++    {
++        compat->cocoa_window = data->cocoa_window;
++        compat->cocoa_view = data->client_view;
++        release_win_data(data);
++    }
++    if ((surface = dxmt_client_surface(hwnd))) compat->client_cocoa_view = surface->cocoa_view;
++    TRACE("hwnd %p -> client view %p\n", hwnd, compat->client_cocoa_view);
++    return compat;
++}
++
++static void dxmt_release_win_data(struct dxmt_compat_win_data *data)
++{
++    free(data);
++}
++
++__attribute__((visibility("default"))) struct dxmt_functions macdrv_functions =
++{
++    NULL,                               /* macdrv_init_display_devices: not used by DXMT */
++    dxmt_get_win_data,
++    dxmt_release_win_data,
++    NULL,                               /* macdrv_get_cocoa_window: not used by DXMT */
++    macdrv_create_metal_device,
++    macdrv_release_metal_device,
++    macdrv_view_create_metal_view,
++    macdrv_view_get_metal_layer,
++    macdrv_view_release_metal_view,
++    NULL,                               /* on_main_thread: not used by DXMT */
++};

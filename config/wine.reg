@@ -1,0 +1,27 @@
+Windows Registry Editor Version 5.00
+
+; Settings FSX: Steam Edition needs in the Wine prefix (applied by `./fsxsilicon setup`; see docs/BUILD.md).
+
+; FSX only uses Direct3D 9 for capability checks; the gdi renderer avoids wined3d's OpenGL probing, which crashes
+; in WoW64 (wined3d-no3d-sm3-caps.diff makes that adapter report Shader Model 3).
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\fsx.exe\Direct3D]
+"renderer"="gdi"
+
+; Cheap DirectSound mixing (dsound-linear-resampler-sse2.diff)
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\fsx.exe\DirectSound]
+"Resampler"="linear"
+
+; DXMT (copied into the FSX folder) and Microsoft's d3dx10_34/d3dcompiler_34, for fsx.exe only: DXMT Wine-wide
+; breaks Steam. The Steam overlay's hooks loop forever in Wine's exception handler.
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\fsx.exe\DllOverrides]
+"d3d10core"="native,builtin"
+"d3d11"="native,builtin"
+"d3dcompiler_34"="native,builtin"
+"d3dx10_34"="native,builtin"
+"dxgi"="native,builtin"
+"gameoverlayrenderer"=""
+
+; Option opens FSX's menu bar
+[HKEY_CURRENT_USER\Software\Wine\Mac Driver]
+"LeftOptionIsAlt"="y"
+"RightOptionIsAlt"="y"

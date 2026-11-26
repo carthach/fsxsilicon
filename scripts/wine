@@ -1,0 +1,5 @@
+#!/bin/bash
+# Run this port's Wine with its prefix and libraries (for tools such as winetricks that need a `wine` executable).
+. "$(dirname "$0")/lib.sh"
+wine_env
+exec "$WINE" "$@"

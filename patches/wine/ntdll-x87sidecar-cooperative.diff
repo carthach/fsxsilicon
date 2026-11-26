@@ -1,0 +1,109 @@
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -70,6 +70,10 @@
+ # include <mach/mach_error.h>
+ # include <mach-o/getsect.h>
+ # include <crt_externs.h>
++# include <servers/bootstrap.h>
++# include <libkern/OSCacheControl.h>
++# include <mach/notify.h>
++# include "x87sidecar_coop_proto.h"
+ # ifndef _POSIX_SPAWN_DISABLE_ASLR
+ #  define _POSIX_SPAWN_DISABLE_ASLR 0x0100
+ # endif
+@@ -519,8 +523,75 @@
+     free( argv[0] );
+ #endif
+     execv( argv[1], argv + 1 );
++}
++
++#ifdef __APPLE__
++/* fsxsilicon: x87sidecar (fast x87 translation for Rosetta). When ROSETTA_X87_PATH names the sidecar,
++ * 32-bit processes are started through "<sidecar> --cooperative <wine> args..."; the sidecar sets
++ * X87_SIDECAR_BOOTSTRAP and the new process hands it its task port (x87sidecar_handshake below). */
++static void x87sidecar_exec( char **argv )
++{
++    const char *sidecar = getenv( "ROSETTA_X87_PATH" );
++    char **new_argv;
++    int i, count;
++
++    if (!sidecar || !*sidecar || access( sidecar, X_OK )) return;
++    for (count = 1; argv[count]; count++) ;
++    if (!(new_argv = malloc( (count + 2) * sizeof(*new_argv) ))) return;
++    new_argv[0] = (char *)sidecar;
++    new_argv[1] = (char *)"--cooperative";
++    for (i = 1; i <= count; i++) new_argv[i + 1] = argv[i];
++    execv( sidecar, new_argv );
++    free( new_argv );
+ }
+ 
++static void x87sidecar_handshake(void)
++{
++    const char *name = getenv( X87_COOP_ENV ), *dot;
++    mach_port_t bootstrap = MACH_PORT_NULL, service = MACH_PORT_NULL, reply = MACH_PORT_NULL;
++    x87_coop_request_t msg;
++    struct { x87_coop_reply_t reply; mach_msg_trailer_t trailer; char slack[64]; } rep;
++    kern_return_t kr;
++    int i;
++
++    if (!name || !*name) return;
++    if (!(dot = strrchr( name, '.' )) || atoi( dot + 1 ) != (int)getpid()) return;
++    if (task_get_bootstrap_port( mach_task_self(), &bootstrap ) != KERN_SUCCESS) goto done;
++    if (bootstrap_look_up( bootstrap, name, &service ) != KERN_SUCCESS) goto done;
++    if (mach_port_allocate( mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply ) != KERN_SUCCESS) goto done;
++
++    memset( &msg, 0, sizeof(msg) );
++    msg.header.msgh_bits = MACH_MSGH_BITS( MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE ) |
++                           MACH_MSGH_BITS_COMPLEX;
++    msg.header.msgh_size = sizeof(msg);
++    msg.header.msgh_remote_port = service;
++    msg.header.msgh_local_port = reply;
++    msg.header.msgh_id = X87_COOP_MSGH_ID;
++    msg.body.msgh_descriptor_count = 2;
++    msg.task_port.name = mach_task_self();
++    msg.task_port.disposition = MACH_MSG_TYPE_COPY_SEND;
++    msg.task_port.type = MACH_MSG_PORT_DESCRIPTOR;
++    msg.thread_port.name = mach_thread_self();
++    msg.thread_port.disposition = MACH_MSG_TYPE_COPY_SEND;
++    msg.thread_port.type = MACH_MSG_PORT_DESCRIPTOR;
++    if (mach_msg( &msg.header, MACH_SEND_MSG, sizeof(msg), 0, MACH_PORT_NULL,
++                  MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL ) != KERN_SUCCESS) goto done;
++
++    memset( &rep, 0, sizeof(rep) );
++    kr = mach_msg( &rep.reply.header, MACH_RCV_MSG, 0, sizeof(rep), reply, 30000, MACH_PORT_NULL );
++    if (kr == KERN_SUCCESS && rep.reply.header.msgh_id == X87_COOP_MSGH_ID + 1 &&
++        rep.reply.header.msgh_size == sizeof(x87_coop_reply_t))
++    {
++        /* the sidecar patched code that is already hot here; flush it from this thread */
++        for (i = 0; i < 2; i++)
++            if (rep.reply.icache_len[i])
++                sys_icache_invalidate( (void *)(uintptr_t)rep.reply.icache_addr[i], rep.reply.icache_len[i] );
++    }
++done:
++    unsetenv( X87_COOP_ENV );
++}
++#endif
++
+ /* exec the appropriate wine loader for the specified machine */
+ static NTSTATUS loader_exec( char **argv, WORD machine )
+ {
+@@ -531,6 +602,9 @@
+     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+ 
+     argv[1] = strdup( wineloader );
++#ifdef __APPLE__
++    if (machine == IMAGE_FILE_MACHINE_I386) x87sidecar_exec( argv );
++#endif
+     preloader_exec( argv );
+     return STATUS_INVALID_IMAGE_FORMAT;
+ }
+@@ -2277,6 +2351,9 @@
+  */
+ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
+ {
++#ifdef __APPLE__
++    x87sidecar_handshake();
++#endif
+     main_argc = argc;
+     main_argv = argv;
+ 

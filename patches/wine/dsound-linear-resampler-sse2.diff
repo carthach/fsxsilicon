@@ -1,0 +1,139 @@
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -21,6 +21,11 @@
+  * License along with this library; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+  */
++
++/* fsxsilicon: use SSE2 for float maths in the 32-bit build; x87 code is slow under Rosetta */
++#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
++#pragma GCC target("sse2", "fpmath=sse")
++#endif
+ 
+ #include <assert.h>
+ #include <stdarg.h>
+@@ -388,6 +393,63 @@
+             for (j = 0; j < fir_used; j++)
+                 sum += fir_copy[j] * cache[j];
+             dsb->put(dsb, i * ostride, channel, sum * dsb->firgain);
++        }
++    }
++
++    return max_ipos;
++}
++
++static UINT cp_fields_resample_linear(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
++{
++    UINT i, channel;
++    UINT istride = dsb->pwfx->nBlockAlign;
++    UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
++    UINT committed_samples = 0;
++    UINT channels = dsb->mix_channels;
++    LONG64 freqAcc_start = *freqAccNum;
++    LONG64 freqAcc_end = freqAcc_start + count * dsb->freqAdjustNum;
++    UINT max_ipos = freqAcc_end / dsb->freqAdjustDen;
++    UINT required_input = max_ipos + 2;
++    float *intermediate, *itmp;
++    DWORD len = required_input * channels * sizeof(float);
++
++    *freqAccNum = freqAcc_end % dsb->freqAdjustDen;
++
++    if (!secondarybuffer_is_audible(dsb))
++        return max_ipos;
++
++    if (!dsb->device->cp_buffer) {
++        dsb->device->cp_buffer = malloc(len);
++        dsb->device->cp_buffer_len = len;
++    } else if (len > dsb->device->cp_buffer_len) {
++        dsb->device->cp_buffer = realloc(dsb->device->cp_buffer, len);
++        dsb->device->cp_buffer_len = len;
++    }
++    intermediate = dsb->device->cp_buffer;
++
++    if(dsb->use_committed) {
++        committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
++        committed_samples = committed_samples <= required_input ? committed_samples : required_input;
++    }
++
++    itmp = intermediate;
++    for (channel = 0; channel < channels; channel++) {
++        for (i = 0; i < committed_samples; i++)
++            *(itmp++) = get_current_sample(dsb, dsb->committedbuff,
++                dsb->writelead, dsb->committed_mixpos + i * istride, channel);
++        for (; i < required_input; i++)
++            *(itmp++) = get_current_sample(dsb, dsb->buffer->memory,
++                    dsb->buflen, dsb->sec_mixpos + i * istride, channel);
++    }
++
++    for (i = 0; i < count; ++i) {
++        LONG64 pos = freqAcc_start + i * dsb->freqAdjustNum;
++        UINT ipos = pos / dsb->freqAdjustDen;
++        float frac = (float)(pos % dsb->freqAdjustDen) / dsb->freqAdjustDen;
++
++        for (channel = 0; channel < channels; channel++) {
++            const float *cache = &intermediate[channel * required_input + ipos];
++            dsb->put(dsb, i * ostride, channel, cache[0] + (cache[1] - cache[0]) * frac);
+         }
+     }
+ 
+@@ -400,6 +462,8 @@
+ 
+     if (dsb->freqAdjustNum == dsb->freqAdjustDen)
+         adv = cp_fields_noresample(dsb, count); /* *freqAccNum is unmodified */
++    else if (ds_linear_resampler)
++        adv = cp_fields_resample_linear(dsb, count, freqAccNum);
+     else
+         adv = cp_fields_resample(dsb, count, freqAccNum);
+ 
+--- a/dlls/dsound/dsound_main.c
++++ b/dlls/dsound/dsound_main.c
+@@ -81,6 +81,7 @@
+ 
+ /* All default settings, you most likely don't want to touch these, see wiki on UsefulRegistryKeys */
+ int ds_hel_buflen = 32768 * 2;
++int ds_linear_resampler = 0;
+ 
+ /*
+  * Get a config key from either the app-specific or the default config
+@@ -131,11 +132,16 @@
+ 
+     if (!get_config_key( hkey, appkey, "HelBuflen", buffer, MAX_PATH ))
+         ds_hel_buflen = atoi(buffer);
++
++    /* fsxsilicon: "linear" swaps the FIR resampler for linear interpolation (much cheaper; the FIR
++     * is ~66 multiply-adds per channel per sample, slow as 32-bit code under Rosetta) */
++    if (!get_config_key( hkey, appkey, "Resampler", buffer, MAX_PATH ))
++        ds_linear_resampler = !strcasecmp( buffer, "linear" );
+ 
+     if (appkey) RegCloseKey( appkey );
+     if (hkey) RegCloseKey( hkey );
+ 
+-    TRACE("ds_hel_buflen = %d\n", ds_hel_buflen);
++    TRACE("ds_hel_buflen = %d, ds_linear_resampler = %d\n", ds_hel_buflen, ds_linear_resampler);
+ }
+ 
+ static const char * get_device_id(LPCGUID pGuid)
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -35,6 +35,7 @@
+ #define DS_MAX_CHANNELS 6
+ 
+ extern int ds_hel_buflen;
++extern int ds_linear_resampler;
+ 
+ /*****************************************************************************
+  * Predeclare the interface implementation structures
+--- a/dlls/dsound/dsound_convert.c
++++ b/dlls/dsound/dsound_convert.c
+@@ -35,6 +35,11 @@
+  */
+ 
+ 
++/* fsxsilicon: use SSE2 for float maths in the 32-bit build; x87 code is slow under Rosetta */
++#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
++#pragma GCC target("sse2", "fpmath=sse")
++#endif
++
+ #include <stdarg.h>
+ #include <math.h>
+ 

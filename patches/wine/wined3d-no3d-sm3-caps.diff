@@ -1,0 +1,31 @@
+--- a/dlls/wined3d/directx.c
++++ b/dlls/wined3d/directx.c
+@@ -2365,6 +2365,8 @@
+ 
+     return WINED3D_OK;
+ }
++
++static const struct wined3d_adapter_ops wined3d_adapter_no3d_ops;
+ 
+ HRESULT CDECL wined3d_get_device_caps(const struct wined3d_adapter *adapter,
+         enum wined3d_device_type device_type, struct wined3d_caps *caps)
+@@ -2592,6 +2594,19 @@
+     caps->MaxTextureBlendStages            = fragment_caps.max_blend_stages;
+     caps->MaxSimultaneousTextures          = fragment_caps.max_textures;
+ 
++    /* fsxsilicon: the no3d (GDI) adapter reports no shader support, so apps that only probe D3D9
++     * caps before rendering through another API (FSX in DX10 mode, on DXMT) refuse to start.
++     * Report SM3-class caps; nothing is rendered through this adapter. */
++    if (adapter->adapter_ops == &wined3d_adapter_no3d_ops)
++    {
++        caps->VertexShaderVersion = 3;
++        caps->MaxVertexShaderConst = 256;
++        caps->PixelShaderVersion = 3;
++        caps->PixelShader1xMaxValue = 8.0f;
++        caps->MaxTextureBlendStages = 8;
++        caps->MaxSimultaneousTextures = 8;
++    }
++
+     caps->MaxUserClipPlanes                = vertex_caps.max_user_clip_planes;
+     caps->MaxActiveLights                  = vertex_caps.max_active_lights;
+     caps->MaxVertexBlendMatrices           = vertex_caps.max_vertex_blend_matrices;

@@ -1,0 +1,58 @@
+--- a/dlls/d3d10/effect.c
++++ b/dlls/d3d10/effect.c
+@@ -18,6 +18,11 @@
+  *
+  */
+ 
++/* fsxsilicon: use SSE2 for float maths in the 32-bit build; x87 code is slow under Rosetta */
++#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
++#pragma GCC target("sse2", "fpmath=sse")
++#endif
++
+ #include "d3d10_private.h"
+ #include <vkd3d_shader.h>
+ 
+@@ -72,8 +77,12 @@
+ static struct d3d10_effect_technique null_technique = {{&d3d10_effect_technique_vtbl}};
+ static struct d3d10_effect_pass null_pass = {{&d3d10_effect_pass_vtbl}};
+ static struct d3d10_effect_type null_type = {{&d3d10_effect_type_vtbl}};
++/* fsxsilicon: give the null buffer zeroed backing storage, so getters and setters on an invalid variable
++ * (returned by GetVariableBy* for a missing name/semantic) are harmless instead of dereferencing
++ * NULL. Windows tolerates this, and FSX's g2d relies on it. */
++static BYTE null_local_buffer_data[4096];
+ static struct d3d10_effect_variable null_local_buffer = {{(const ID3D10EffectVariableVtbl *)&d3d10_effect_constant_buffer_vtbl},
+-        &null_local_buffer, &null_type};
++        &null_local_buffer, &null_type, .u.buffer.local_buffer = null_local_buffer_data};
+ static struct d3d10_effect_variable null_variable = {{&d3d10_effect_variable_vtbl},
+         &null_local_buffer, &null_type};
+ static struct d3d10_effect_variable null_scalar_variable = {{(const ID3D10EffectVariableVtbl *)&d3d10_effect_scalar_variable_vtbl},
+@@ -7105,7 +7114,10 @@
+     unsigned int col_count = !transpose ? variable->type->column_count : variable->type->row_count;
+     unsigned int row_count = !transpose ? variable->type->row_count : variable->type->column_count;
+     BOOL major = variable->type->type_class == D3D10_SVC_MATRIX_COLUMNS;
+-    float *dst = dst_void;
++    /* fsxsilicon: copy the elements as 32-bit integers. As floats, i386 gcc moves each one through the x87
++     * stack (fld/fstp), which is slow under Rosetta; FSX calls this for every SetMatrix. */
++    UINT32 *dst = dst_void;
++    const UINT32 *s = (const UINT32 *)src->m;
+     unsigned int row, col;
+ 
+     if (transpose)
+@@ -7116,7 +7128,7 @@
+         for (col = 0; col < col_count; ++col)
+         {
+             for (row = 0; row < row_count; ++row)
+-                dst[(col * 4) + row] = src->m[row][col];
++                dst[(col * 4) + row] = s[(row * 4) + col];
+         }
+     }
+     else
+@@ -7124,7 +7136,7 @@
+         for (row = 0; row < row_count; ++row)
+         {
+             for (col = 0; col < col_count; ++col)
+-                dst[(row * 4) + col] = src->m[row][col];
++                dst[(row * 4) + col] = s[(row * 4) + col];
+         }
+     }
+ }

@@ -1,0 +1,31 @@
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -539,6 +539,28 @@
+     {
+         if (!(tidy_cmdline = get_file_name( cmd_line, name, ARRAY_SIZE(name) ))) return FALSE;
+         app_name = name;
++    }
++
++    /* fsxsilicon: Chromium's GPU process paints software frames into windows owned by the browser
++     * process. Window surfaces are per process in winemac, so that drawing is lost and Steam's
++     * windows stay black. Run the GPU/compositor thread inside the browser process instead. */
++    if ((p = wcsrchr( app_name, '\\' )) && !wcsicmp( p + 1, L"steamwebhelper.exe" ) &&
++        !wcsstr( tidy_cmdline, L"--type=" ) && !wcsstr( tidy_cmdline, L"--in-process-gpu" ))
++    {
++        static const WCHAR switch_inproc[] = L" --in-process-gpu";
++        WCHAR *new_cmdline;
++        SIZE_T len = lstrlenW( tidy_cmdline );
++
++        if (!(new_cmdline = RtlAllocateHeap( GetProcessHeap(), 0, (len + ARRAY_SIZE(switch_inproc)) * sizeof(WCHAR) )))
++        {
++            if (tidy_cmdline != cmd_line) HeapFree( GetProcessHeap(), 0, tidy_cmdline );
++            return FALSE;
++        }
++        memcpy( new_cmdline, tidy_cmdline, len * sizeof(WCHAR) );
++        memcpy( new_cmdline + len, switch_inproc, sizeof(switch_inproc) );
++        if (tidy_cmdline != cmd_line) HeapFree( GetProcessHeap(), 0, tidy_cmdline );
++        tidy_cmdline = new_cmdline;
++        TRACE( "steamwebhelper: added --in-process-gpu\n" );
+     }
+ 
+     /* Warn if unsupported features are used */
