@@ -9,7 +9,8 @@ needs fixing or changing. Pinned versions and checksums are in `scripts/lib.sh`;
 - Apple Silicon Mac with Rosetta 2.
 - Homebrew: `mingw-w64` (Wine's PE side, fsxopt, fsxrumble, DXMT 64-bit), `bison flex`, `llvm lld` (only for the
   Wine tools build's configure check), `freetype` (arm64, for the Wine tools), `cmake ninja meson` (LLVM, DXMT,
-  x87sidecar), `cabextract` and `winetricks` (prefix setup).
+  x87sidecar), `ccache` (optional: rebuilds reuse unchanged objects, cache in `.work/ccache`; `FSXSILICON_CCACHE=0`
+  turns it off), `cabextract` and `winetricks` (prefix setup).
 - Xcode with the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`): DXMT compiles Metal shaders.
   The scripts use `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (override with `DEVELOPER_DIR`), so
   `xcode-select` can keep pointing at the Command Line Tools.
@@ -18,14 +19,15 @@ Homebrew's Wine casks were disabled on 2026-09-01 (Gatekeeper), and the port nee
 
 ## Build (`./fsxsilicon build`)
 
-Steps run in this order and each is skipped once done (stamps in `.work/stamps/`):
+Steps run in this order and each is skipped once done (stamps in `.work/stamps/`). The deps and LLVM steps delete
+their sources and build trees when they finish; Wine's are kept, because DXMT builds against them.
 
 | step | result in `runtime/` |
 |---|---|
 | `deps` | `deps/lib`: x86_64 FreeType 2.13.3, GMP 6.3.0, Nettle 3.10.1, GnuTLS 3.8.9 |
-| `wine` | `wine-install/`: Wine 11.0 with `patches/wine/*.diff` |
 | `x87sidecar` | `bin/x87sidecar`, built from the pinned release tag |
-| `llvm` | (`.work/toolchains/llvm-darwin`) LLVM 15.0.7 for x86_64 macOS, which DXMT links against |
+| `wine` | `wine-install/`: Wine 11.0 with `patches/wine/*.diff` (run-time files only: `make install-lib`) |
+| `llvm` | (`.work/toolchains/llvm-darwin`) LLVM 15.0.7 for x86_64 macOS: only the libraries and headers DXMT links against |
 | `dxmt` | `winemetal.so`/`winemetal.dll` in Wine; `dxmt/` d3d11, dxgi, d3d10core for the FSX folder |
 | `addons` | `addons/fsxopt.dll`, `addons/fsxrumble.exe` |
 | `gamemode` | `Wine FSX.app` (see below) |
@@ -39,6 +41,8 @@ so Wine is a **cross build**: native arm64 tools first (`.work/build/wine-tools`
 - GnuTLS is required: without it Wine's bcrypt/secur32 can't do TLS and Steam can't open its WebSocket connections.
 - Run the x86_64 loader (`wine-install/lib/wine/x86_64-unix/wine`, or `build/wine/loader/wine` in the build tree),
   not `build/wine/wine`, which is a symlink to the arm64 tools loader.
+- `FSXSILICON_DEBUG=1 ./fsxsilicon build wine` builds the PE modules with `-g`, for symbolised backtraces.
+- Rebuilding Wine starts from an empty `wine-install/` and redoes the `dxmt` and `gamemode` steps.
 - Don't run Wine through `/usr/bin/timeout` or other SIP-protected binaries: they strip `DYLD_*` variables, so
   FreeType and GnuTLS (found through `DYLD_FALLBACK_LIBRARY_PATH`) are not loaded.
 

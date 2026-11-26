@@ -18,7 +18,7 @@ relpath() { python3 -I -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys
 
 case "$action" in
 install)
-    [ -f "$unix/wine.bin" ] && [ ! -L "$unix/wine" ] && rm -f "$unix/wine.bin"   # fresh `make install`
+    [ -f "$unix/wine.bin" ] && [ ! -L "$unix/wine" ] && rm -f "$unix/wine.bin"   # fresh Wine install
     [ -f "$unix/wine.bin" ] || cp -p "$unix/wine" "$unix/wine.bin"
     mkdir -p "$bundle/Contents/MacOS"
     bundle=$(cd "$bundle" && pwd)

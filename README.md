@@ -20,7 +20,7 @@ Needs an Apple Silicon Mac, [Homebrew](https://brew.sh), Xcode (for the Metal co
 ```sh
 git clone <this repo> fsxsilicon && cd fsxsilicon
 ./fsxsilicon deps      # Homebrew build tools, Xcode Metal toolchain, Rosetta
-./fsxsilicon build     # Wine, DXMT, LLVM, x87sidecar, our helpers -> runtime/   (about an hour the first time)
+./fsxsilicon build     # Wine, DXMT, LLVM, x87sidecar, our helpers -> runtime/   (about 15 minutes the first time)
 ./fsxsilicon setup     # Wine prefix: settings, fonts, d3dx10_34, Windows Steam
 ./fsxsilicon steam     # sign in, install FSX: Steam Edition, start it once, quit Steam
 ./fsxsilicon install   # DXMT + helpers into the FSX folder, FSX options

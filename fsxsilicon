@@ -9,7 +9,7 @@ usage: ./fsxsilicon <command>
 
 First time, in order:
   deps          install the build tools (Homebrew packages, Xcode's Metal toolchain)
-  build [step]  build Wine, DXMT, x87sidecar and our helpers into runtime/      (~1 hour the first time)
+  build [step]  build Wine, DXMT, x87sidecar and our helpers into runtime/      (~15 min the first time)
   setup         create the Wine prefix: settings, fonts, DirectX d3dx10_34, Windows Steam
   steam         start Steam; sign in, install FSX: Steam Edition, start it once, then quit Steam
   install       put DXMT, fsxopt and fsxrumble into the FSX folder and set FSX's options
@@ -24,7 +24,7 @@ Other:
   wine ARGS     run a program with this Wine and prefix (e.g. ./fsxsilicon wine winecfg)
   controller VID:PID   let Wine use a Bluetooth gamepad directly (Xbox Wireless Controller: 045E:0B20, the default)
   gamemode on|off      run Wine from an app bundle so macOS Game Mode applies in full screen (on by default)
-  clean [--all]        delete build trees and sources (--all: downloads and toolchains too); runtime/ is kept
+  clean [--all]        delete build trees and sources (--all: downloads, toolchains, compiler cache too); runtime/ is kept
 
 Directories: runtime/ (\$FSXSILICON_RUNTIME, now $RUNTIME), .work/ (\$FSXSILICON_WORK, now $WORK)
 EOF
@@ -108,7 +108,7 @@ cmd_setup() {
 # Steam exits with its parent shell, so it starts detached, ignoring SIGHUP. Not with /usr/bin/nohup: SIP strips
 # DYLD_* from protected binaries, and Wine then can't find FreeType (no text) or GnuTLS (no network).
 # Its windows stay black without the CEF flags (plus kernelbase-steamwebhelper-inprocess-gpu.diff).
-start_steam() {
+cmd_steam() {
     need_prefix
     # FSX's crash handler starts dxdiag.exe, which hangs under Wine; Steam then refuses to start FSX
     pkill -f 'dxdiag\.exe' 2>/dev/null || true
@@ -119,8 +119,7 @@ start_steam() {
     disown
     ok "Steam starting (log: $log; FSXSILICON_X87=${FSXSILICON_X87:-1})"
 }
-cmd_steam() { start_steam "$@"; }
-cmd_fsx()   { [ -f "$FSX_DIR/fsx.exe" ] || die "FSX isn't installed in the prefix yet"; start_steam -applaunch 314160; }
+cmd_fsx() { [ -f "$FSX_DIR/fsx.exe" ] || die "FSX isn't installed in the prefix yet"; cmd_steam -applaunch 314160; }
 
 cmd_stop() { [ -x "$WINE_INSTALL/bin/wineserver" ] && WINEPREFIX="$PREFIX" "$WINE_INSTALL/bin/wineserver" -k || true; ok "stopped"; }
 
@@ -151,15 +150,16 @@ cmd_install() {
 
 cmd_status() {
     local f
-    is_wine_dll "$PREFIX/drive_c/windows/syswow64/d3dx10_34.dll" && printf ' -- %s\n' "d3dx10_34 (Microsoft's)" \
-        || ok "d3dx10_34 (Microsoft's)"
     for f in "$WINE:Wine" "$DEPS/lib/libgnutls.dylib:GnuTLS/FreeType" "$RUNTIME/bin/x87sidecar:x87sidecar" \
              "$WINE_INSTALL/lib/wine/x86_64-unix/winemetal.so:DXMT (Wine side)" "$RUNTIME/dxmt/d3d11.dll:DXMT (FSX side)" \
              "$RUNTIME/addons/fsxopt.dll:fsxopt/fsxrumble" "$BUNDLE/Contents/MacOS/wine:Game Mode bundle" \
              "$PREFIX/system.reg:Wine prefix" "$PREFIX/drive_c/windows/Fonts/arial.ttf:core fonts" \
+             "$PREFIX/drive_c/windows/syswow64/d3dx10_34.dll:d3dx10_34 (Microsoft's)" \
              "$PREFIX/drive_c/Program Files (x86)/Steam/Steam.exe:Steam" "$FSX_DIR/fsx.exe:FSX" \
              "$FSX_DIR/fsxopt.dll:FSX add-ons installed"; do
-        if [ -e "${f%%:*}" ]; then ok "${f##*:}"; else printf ' -- %s\n' "${f##*:}"; fi
+        # d3dx10_34 only counts as installed when it is Microsoft's, not Wine's builtin
+        if [ -e "${f%%:*}" ] && ! { [[ $f == *d3dx10_34* ]] && is_wine_dll "${f%%:*}"; }; then ok "${f##*:}"
+        else printf ' -- %s\n' "${f##*:}"; fi
     done
     wine_running && echo "Wine is running" || true
 }
@@ -183,8 +183,8 @@ cmd_gamemode() {
 }
 
 cmd_clean() {
-    log "removing $SRC $BLD $WORK/dxmt-stage"
-    rm -rf "$SRC" "$BLD" "$WORK/dxmt-stage"
+    log "removing $SRC $BLD"
+    rm -rf "$SRC" "$BLD"
     if [ "$1" = --all ]; then rm -rf "$WORK"; fi
     ok "clean (runtime kept: $RUNTIME)"
 }

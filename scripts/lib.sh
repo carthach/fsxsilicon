@@ -54,7 +54,7 @@ DXREDIST_URL=https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82
 DXREDIST_SHA256=053f76dcbb28802e23341b6a787e3b0791c0fa5c8d4d011b1044172dbf89c73b
 STEAMSETUP_URL=https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe
 
-BREW_PACKAGES="mingw-w64 bison flex llvm lld cmake ninja meson cabextract winetricks freetype"
+BREW_PACKAGES="mingw-w64 bison flex llvm lld cmake ninja meson ccache cabextract winetricks freetype"
 
 # ---- helpers -----------------------------------------------------------------------------------------------------
 if [ -t 1 ]; then _b=$'\033[1m'; _r=$'\033[31m'; _g=$'\033[32m'; _0=$'\033[0m'; else _b= _r= _g= _0=; fi
@@ -80,11 +80,11 @@ fetch() {
     echo "$f"
 }
 
-# unpack URL SHA256 DIR: fetch and extract an archive into $SRC/DIR (fresh)
+# unpack URL SHA256 DIR [tar args...]: fetch and extract an archive into $SRC/DIR (fresh); extra args select members
 unpack() {
     local f; f=$(fetch "$1" "$2")
     rm -rf "$SRC/$3"; mkdir -p "$SRC"
-    tar -xf "$f" -C "$SRC"
+    tar -xf "$f" -C "$SRC" "${@:4}"
     [ -d "$SRC/$3" ] || die "$f did not contain $3"
 }
 
